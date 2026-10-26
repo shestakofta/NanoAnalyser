@@ -60,13 +60,13 @@ jobs:
         run: |
           cd dist
           ditto -c -k --keepParent \
-            NPA ML.app \
-            NPA ML-macos-${{ matrix.arch }}.zip
+            "NPA ML.app" \
+            "NPA ML-macos-${{ matrix.arch }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NPA ML-macos-${{ matrix.arch }}
-          path: dist/NPA ML-macos-${{ matrix.arch }}.zip
+          name: NPA-ML-macos-${{ matrix.arch }}
+          path: "dist/NPA ML-macos-${{ matrix.arch }}.zip"
           if-no-files-found: error
           retention-days: 30
