@@ -68,10 +68,13 @@
 
 ## Сборка и структура репозитория
 - **Windows**: `build_exe.bat` (venv → `make_about.py` → PyInstaller onedir, `--collect-submodules skimage`, hidden imports). `!infoabout.txt` лежит в корне.
-- **macOS / GitHub**:
-  - `.github/workflows/build_macos.yml` — матрица `macos-15` (arm64) и `macos-15-intel`, Python 3.12, `.app` с именем «NPA ML», ad-hoc подпись, zip через `ditto` (имена с пробелом — в кавычках);
-  - ресурсы в `resources/` (`!infoabout.txt`, `NPA.icns`, `NPA.ico`, `NPA.png`, `README.md`);
-  - `make_about.py` и `App.about_text()` ищут `!infoabout.txt` сначала в `resources/`, потом в корне.
+- **GitHub Actions** — `.github/workflows/build.yml`, только ручной запуск (`workflow_dispatch`) с выбором **одной** платформы:
+  - `mac-arm64` → `macos-15`, `mac-intel` → `macos-15-intel`, `windows` → `windows-latest`, `linux` → `ubuntu-22.04` (ради совместимости glibc);
+  - все шаги на `bash` (в Windows — Git Bash); имя: «NPA ML» (.app) на Mac, `NanoAnalyzer` на Windows/Linux; значок `NPA.icns`/`NPA.ico` (в Linux без значка);
+  - smoke-тест (галочка, по умолчанию вкл.): `ci/make_test_image.py` делает синтетический снимок, собранная программа запускается с `--batch`, масштаб — временный `nano_settings.json` рядом с исполняемым файлом (удаляется **до** подписи на Mac); проверка — `done: 1 of 1` в `batch_log.txt` и наличие xlsx;
+  - упаковка: Mac — ad-hoc подпись + `ditto` zip; Windows — 7z zip; Linux — tar.gz (сохраняет права); артефакт `NPA-v<APP_VERSION>-<платформа>`;
+  - прежний `build_macos.yml` (две мак-версии разом, запуск по push) заменён этим сценарием.
+- Ресурсы — в `resources/` (`!infoabout.txt`, `NPA.icns`, `NPA.ico`, `NPA.png`, `README.md`). `make_about.py`, `App.about_text()`, `build_exe.bat` и `build.yml` ищут файлы сначала в `resources/`, потом в корне — одна папка годится для всех платформ.
 - Настройки ML: `%APPDATA%\NPA\ml_settings.json`, или `~/.config/NPA/ml_settings.json` на macOS/Linux.
 
 ## Проверка

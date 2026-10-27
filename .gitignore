@@ -7,3 +7,4 @@ dist/
 *.spec
 .DS_Store
 .env
+smoke_test/

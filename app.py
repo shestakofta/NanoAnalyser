@@ -51,6 +51,15 @@ PROC_KEYS = ("contrast", "denoise", "d_cut", "nm_per_px", "bar_nm", "bar_px", "e
 ADV_KEYS = ("edge", "halo_nm", "prim_dmin", "prim_dmax", "ka", "alpha", "nf_packing", "k_hyst_lo", "k_hyst_hi", "film")
 CONTRAST_RANGE = (0.10, 0.95)
 DENOISE_RANGE = (0.2, 5.0)
+TIP_DOUBT = (
+    "Сомнительная частица. Щёлкните по кругу, если не уверены, что это отдельная частица или что её "
+    "граница проведена верно. Круг останется в разметке и будет помечен «?»; при обучении он не "
+    "засчитывается ни как правильный, ни как ошибочный. Повторный щелчок — снять отметку. Ставьте «?» "
+    "вместо того, чтобы удалять сомнительный круг.")
+TIP_REGION = (
+    "Зона разметки. Если снимок слишком плотный, чтобы разметить его целиком, обведите прямоугольником "
+    "(по диагонали) участок не меньше трети кадра и разметьте в нём все частицы. Модель будет учиться "
+    "только по этому участку: частицы вне зоны не считаются пропущенными. «Зона: весь кадр» убирает зону.")
 ZOOM_MAX = 8.0
 ZOOM_MIN = 0.05
 
@@ -67,8 +76,13 @@ def fmt_dur(sec):
 # Цвета графиков и правок совпадают с цветами разметки на снимке
 C_MOD = "#1baf7a"; C_MOD_LIGHT = "#9fdcc2"; C_PRIM = "#eb6834"; C_AGG = "#2a78d6"
 C_DEL = "#e53935"; C_WARN = "#c25e00"
-C_ML = "#00d8ff"          # отметки блока ML (сомнение «?», зона разметки, точки круга)
+C_ML = "#00d8ff"          # отметки блока ML (сомнение «?», зона разметки)
 ACCENT = "#6a2fb0"        # фиолетовый — цвет значка NPA
+IS_MAC = sys.platform == "darwin"
+# В macOS размеры шрифтов Tk — в пунктах при 72 точках на дюйм: те же числа, что в Windows, дают
+# заметно более мелкий текст. FS() пересчитывает размер, чтобы надписи выглядели одинаково.
+FS = (lambda n: int(round(n * 4 / 3))) if IS_MAC else (lambda n: n)
+MOD = "Command" if IS_MAC else "Control"   # модификатор горячих клавиш: Cmd в macOS, Ctrl в остальных
 DISABLED = "#b9b9b9"
 
 
@@ -82,9 +96,9 @@ def _same(a, b):
 
 
 class Tip:
-    """Всплывающая подсказка при наведении мыши."""
-    def __init__(self, widget, text):
-        self.w, self.text, self.tw = widget, text, None
+    """Всплывающая подсказка при наведении мыши (wrap — ширина строки в пикселях для длинных подсказок)."""
+    def __init__(self, widget, text, wrap=0):
+        self.w, self.text, self.tw, self.wrap = widget, text, None, wrap
         widget.bind("<Enter>", self.show, add="+"); widget.bind("<Leave>", self.hide, add="+")
 
     def show(self, e=None):
@@ -93,7 +107,7 @@ class Tip:
         self.tw = tw = tk.Toplevel(self.w); tw.wm_overrideredirect(True)
         tw.wm_geometry("+{}+{}".format(self.w.winfo_rootx() + 10, self.w.winfo_rooty() + self.w.winfo_height() + 4))
         tk.Label(tw, text=self.text, background="#ffffe8", relief="solid", borderwidth=1, justify="left",
-                 padx=6, pady=3).pack()
+                 padx=6, pady=3, wraplength=self.wrap).pack()
 
     def hide(self, e=None):
         if self.tw:
@@ -105,7 +119,7 @@ class Section:
     def __init__(self, parent, title, bg, expanded=True, enabled=True, on_toggle=None):
         self.title, self.bg, self.enabled, self.on_toggle = title, bg, enabled, on_toggle
         self.frame = ttk.Frame(parent); self.frame.pack(fill=tk.X, pady=(8, 0))
-        self.hdr = tk.Label(self.frame, anchor="w", bg=bg, font=("TkDefaultFont", 10, "bold"), cursor="hand2")
+        self.hdr = tk.Label(self.frame, anchor="w", bg=bg, font=("TkDefaultFont", FS(10), "bold"), cursor="hand2")
         self.hdr.pack(fill=tk.X)
         ttk.Separator(self.frame).pack(fill=tk.X, pady=(1, 0))
         self.body = ttk.Frame(self.frame, padding=(6, 6, 2, 2))
@@ -263,14 +277,91 @@ class App(tk.Tk):
         self._t_batch = None
         self.adv = {k: npc.DEFAULTS[k] for k in ADV_KEYS}
         self.mlcfg = ml_annot.load_config()   # разметчик и папка набора для обучения (хранятся между запусками)
-        self._c3 = None            # точки строящегося «круга по трём точкам» (блок ML)
+        self._c3 = None            # точки строящегося «круга по трём точкам» (раздел «Редактировать»)
         self._build_left()
         self._build_right()
+        self._guard_wheel(self._lp_left)
         # Ctrl+Z — в любой раскладке (в русской это Ctrl+Я; keycode 90 — клавиша Z в Windows)
         self.bind_all("<Control-KeyPress>", self._ctrl_key)
+        if IS_MAC:                 # в macOS те же сочетания — с Cmd (Cmd+Z, Cmd+плюс, Cmd+минус)
+            self.bind_all("<Command-KeyPress>", self._ctrl_key)
         self.bind_all("<Return>", self._enter_key); self.bind_all("<KP_Enter>", self._enter_key)
         self.hist = {}             # путь -> снимки результата до последних применённых правок (до 3 шагов)
         self.after(200, self._poll_queue)
+
+    # ------------------------------------------------------------------ колесо мыши и жесты тачпада
+    def _wheel_steps(self, e, acc, scale=1.0, touch=False):
+        """Событие колеса/жеста -> целое число шагов прокрутки (+ вниз, - вверх).
+        Тачпады (точная прокрутка в Windows, жест двумя пальцами в macOS) присылают много мелких
+        событий — они накапливаются в self.<acc>, чтобы прокрутка была плавной, а не рывками или «в никуда»."""
+        num = getattr(e, "num", 0)
+        if num in (4, 5):                                   # Linux/X11: кнопки 4/5 = один щелчок колеса
+            return int(round((-3 if num == 4 else 3) * scale)) or (-1 if num == 4 else 1)
+        d = getattr(e, "delta", 0) or 0
+        if touch:                                           # Tk 9 <TouchpadScroll>: смещение в пикселях
+            dy = d & 0xFFFF
+            dy = dy - 0x10000 if dy >= 0x8000 else dy
+            v = -dy / max(1.0, float(self.px(16)))
+        elif IS_MAC:                                        # macOS: delta — строки (1..10), тачпад даёт ±1 на событие
+            v = -float(d)
+        else:                                               # Windows: 120 на щелчок колеса, тачпад — дробные доли
+            v = -float(d) / 120.0 * 3.0
+        v *= scale
+        a = getattr(self, acc, 0.0)
+        if a * v < 0:                                       # сменили направление — остаток не тянем
+            a = 0.0
+        a += v
+        n = int(a)
+        setattr(self, acc, a - n)
+        return n
+
+    def _setup_panel_wheel(self, cv, left):
+        """Прокрутка левой панели колесом и жестом на тачпаде — где бы ни был указатель над панелью
+        (над кнопками, полями, заголовками разделов). Один общий обработчик на всё окно: он сам
+        проверяет, что указатель над панелью, поэтому не теряется при переходе между элементами."""
+        self._lp_cv, self._lp_left = cv, left
+        cv.configure(yscrollincrement=self.px(16))
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_all(ev, self._panel_wheel, add="+")
+        try:                                                # Tk 9 (macOS): жест двумя пальцами — отдельное событие
+            self.bind_all("<TouchpadScroll>", lambda e: self._panel_wheel(e, touch=True), add="+")
+        except tk.TclError:
+            pass
+
+    def _panel_wheel(self, e, touch=False):
+        cv, left = self._lp_cv, self._lp_left
+        try:
+            w = self.winfo_containing(e.x_root, e.y_root)
+        except (KeyError, tk.TclError):
+            return
+        if w is None:
+            return
+        p = str(cv)
+        if str(w) != p and not str(w).startswith(p + "."):
+            return                                          # указатель не над левой панелью
+        if isinstance(w, (ttk.Combobox, ttk.Spinbox, tk.Spinbox)) and self.focus_get() is w:
+            return                                          # активное поле со списком/счётчиком крутит своё значение
+        if isinstance(w, tk.Text) and tuple(round(v, 3) for v in w.yview()) != (0.0, 1.0):
+            return                                          # текстовое поле с прокруткой прокручивается само
+        if cv.winfo_height() >= left.winfo_reqheight():
+            return
+        n = self._wheel_steps(e, "_acc_panel", touch=touch)
+        if n:
+            cv.yview_scroll(n, "units")
+
+    def _guard_wheel(self, root):
+        """Поля со списком и счётчики в левой панели: колесо над неактивным полем прокручивает панель,
+        а не меняет значение (иначе при прокрутке легко случайно сменить, например, элемент)."""
+        for w in root.winfo_children():
+            if isinstance(w, (ttk.Combobox, ttk.Spinbox, tk.Spinbox)):
+                def h(e, w=w, touch=False):
+                    if self.focus_get() is w:
+                        return None
+                    self._panel_wheel(e, touch=touch)
+                    return "break"
+                for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                    w.bind(ev, h)
+            self._guard_wheel(w)
 
     def px(self, n):
         return int(round(n * self.ui))
@@ -330,10 +421,10 @@ class App(tk.Tk):
     def _styles(self):
         st = ttk.Style(self)
         st.configure("Treeview", rowheight=self.px(22))
-        st.configure("Accent.TButton", font=("TkDefaultFont", 11, "bold"), foreground=ACCENT)
-        st.configure("Hint.TLabel", foreground="#777777", font=("TkDefaultFont", 8))
-        st.configure("Warn.TLabel", foreground=C_WARN, font=("TkDefaultFont", 8))
-        st.configure("Info.TLabel", foreground="#333333", font=("TkDefaultFont", 8))
+        st.configure("Accent.TButton", font=("TkDefaultFont", FS(11), "bold"), foreground=ACCENT)
+        st.configure("Hint.TLabel", foreground="#777777", font=("TkDefaultFont", FS(8)))
+        st.configure("Warn.TLabel", foreground=C_WARN, font=("TkDefaultFont", FS(8)))
+        st.configure("Info.TLabel", foreground="#333333", font=("TkDefaultFont", FS(8)))
         st.configure("Status.TLabel", foreground="#333333")
         self.panel_bg = st.lookup("TFrame", "background") or "#d9d9d9"
 
@@ -349,14 +440,7 @@ class App(tk.Tk):
         cv.create_window(0, 0, window=left, anchor="nw")
         left.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all"), width=left.winfo_reqwidth()))
 
-        def _wheel(e):
-            if cv.winfo_height() < left.winfo_reqheight():
-                cv.yview_scroll(-1 if (getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4) else 1, "units")
-        for w in (cv, left):
-            w.bind("<Enter>", lambda e: (cv.bind_all("<MouseWheel>", _wheel), cv.bind_all("<Button-4>", _wheel),
-                                         cv.bind_all("<Button-5>", _wheel)))
-            w.bind("<Leave>", lambda e: (cv.unbind_all("<MouseWheel>"), cv.unbind_all("<Button-4>"),
-                                         cv.unbind_all("<Button-5>")))
+        self._setup_panel_wheel(cv, left)
         wrap = self.px(305)
         bg = self.panel_bg
 
@@ -370,7 +454,9 @@ class App(tk.Tk):
         self.lst.bind("<<ListboxSelect>>", lambda e: self.show_selected())
 
         def _lwheel(e):     # колесо над списком прокручивает список, а не всю панель
-            self.lst.yview_scroll(-1 if (getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4) else 1, "units")
+            n = self._wheel_steps(e, "_acc_lst", scale=1 / 3)
+            if n:
+                self.lst.yview_scroll(n, "units")
             return "break"
         for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.lst.bind(ev, _lwheel)
@@ -465,10 +551,16 @@ class App(tk.Tk):
         ttk.Checkbutton(run, text="Учитывать обрезанные краем объекты (видимую часть)",
                         variable=self.v_cut, command=self._density_changed).pack(anchor="w")
         ncpu = os.cpu_count() or 1
-        self.v_cores = tk.DoubleVar(value=max(1, ncpu - 1))
+        ram = total_ram_gb()
+        # по умолчанию: все ядра, кроме одного, но не больше, чем позволяет память
+        # (~0,75 ГБ на процесс при больших снимках, 2 ГБ оставляем системе) — важно для ноутбуков с 8 ГБ
+        by_ram = max(1, int((ram - 2.0) / 0.75)) if ram else ncpu
+        self.v_cores = tk.DoubleVar(value=max(1, min(ncpu - 1, by_ram)))
         if ncpu > 1:
-            self._slider(run, "Использовать ядер для обработки", self.v_cores, 1, ncpu, 1, "{:.0f}",
-                         "Всего ядер: {}. Одно лучше оставить свободным, чтобы компьютер не тормозил.".format(ncpu), wrap)
+            hint = "Всего ядер: {}. Одно лучше оставить свободным, чтобы компьютер не тормозил.".format(ncpu)
+            if ram and by_ram < ncpu - 1:
+                hint += " Память {:.0f} ГБ: по умолчанию выбрано {} — так её хватит на большие снимки.".format(ram, by_ram)
+            self._slider(run, "Использовать ядер для обработки", self.v_cores, 1, ncpu, 1, "{:.0f}", hint, wrap)
         ttk.Button(run, text="Расширенные настройки", command=self.open_advanced).pack(fill=tk.X, pady=(8, 0))
 
         # --- Кнопка запуска (не сворачивается)
@@ -494,7 +586,7 @@ class App(tk.Tk):
         self._build_edit(self.sec_edit.body, wrap)
 
         # --- Разметка для обучения (ML): набор снимков для машинного обучения
-        self.sec_ml = Section(left, "Разметка для обучения (ML)", bg, expanded=False, on_toggle=self._ml_refresh)
+        self.sec_ml = Section(left, "Разметка для обучения (ML)", bg, expanded=False, enabled=False, on_toggle=self._ml_refresh)
         self._build_ml(self.sec_ml.body, wrap)
 
         # --- Сохранение
@@ -526,7 +618,7 @@ class App(tk.Tk):
 
     def _build_edit(self, box, wrap):
         isz = self.px(22)
-        self._ico = {k: make_icon(k, isz) for k in ("rect", "circle", "lasso", "poly", "spline", "cycle")}
+        self._ico = {k: make_icon(k, isz) for k in ("rect", "circle", "lasso", "poly", "spline", "cycle", "c3")}
         self._ico_del = {k: make_icon(k, isz, color=C_DEL) for k in ("rect", "circle", "lasso", "point", "poly", "spline")}
         self.v_tool = tk.StringVar(value="toggle")
         self.v_tool.trace_add("write", lambda *a: self._tool_changed())
@@ -561,7 +653,9 @@ class App(tk.Tk):
         for k, val, tip in (("spline", "add_spline", "Замкнутый сплайн. " + poly_tip),
                             ("poly", "add_poly", "Замкнутая ломаная. " + poly_tip),
                             ("lasso", "add_contour", "Произвольный контур: обведите мышью"),
-                            ("circle", "add_circle", "Круг: от центра к краю")):
+                            ("circle", "add_circle", "Круг: от центра к краю"),
+                            ("c3", "add_c3", "Круг по трём точкам: три щелчка по видимому краю частицы.\n"
+                                             "Удобно, если центр частицы не виден или её часть закрыта соседней")):
             rb = ttk.Radiobutton(row, image=self._ico[k], style="Toolbutton", variable=self.v_tool, value=val)
             rb.pack(side=tk.RIGHT, padx=1); Tip(rb, tip)
         row = ttk.Frame(box); row.pack(fill=tk.X, pady=(2, 0))
@@ -599,10 +693,16 @@ class App(tk.Tk):
         isz = self.px(22)
         self._ico_meas = {k: make_icon(k, isz) for k in ("m_pp", "m_ll", "m_circ")}
         self.v_meas_on = tk.BooleanVar(value=False)
-        self.btn_meas = tk.Checkbutton(box, text="Измерить", variable=self.v_meas_on, indicatoron=False,
-                                       relief="raised", offrelief="raised", bd=2, selectcolor="#ded2f1",
-                                       font=("TkDefaultFont", 10, "bold"), fg=ACCENT, activeforeground=ACCENT,
-                                       command=self._meas_toggled, cursor="hand2")
+        if IS_MAC:                 # Aqua не рисует цвета у tk.Checkbutton — кнопка-переключатель ttk
+            ttk.Style(self).configure("Meas.Toolbutton", font=("TkDefaultFont", FS(10), "bold"), foreground=ACCENT,
+                                      anchor="center", padding=self.px(3))
+            self.btn_meas = ttk.Checkbutton(box, text="Измерить", variable=self.v_meas_on, style="Meas.Toolbutton",
+                                            command=self._meas_toggled, cursor="hand2")
+        else:
+            self.btn_meas = tk.Checkbutton(box, text="Измерить", variable=self.v_meas_on, indicatoron=False,
+                                           relief="raised", offrelief="raised", bd=2, selectcolor="#ded2f1",
+                                           font=("TkDefaultFont", FS(10), "bold"), fg=ACCENT, activeforeground=ACCENT,
+                                           command=self._meas_toggled, cursor="hand2")
         self.btn_meas.pack(fill=tk.X, pady=(0, 6), ipady=self.px(2))
         self.v_mtool = tk.StringVar(value="pp")
         row = ttk.Frame(box); row.pack(fill=tk.X)
@@ -617,7 +717,7 @@ class App(tk.Tk):
         ttk.Checkbutton(box, text="Диаметр и масса частицы под курсором", variable=self.v_mhover,
                         command=lambda: self.canvas.delete("hover")).pack(anchor="w", pady=(4, 0))
         self.txt_meas = tk.Text(box, height=5, width=36, wrap="word", relief="flat", padx=4, pady=2,
-                                font=("TkDefaultFont", 9))
+                                font=("TkDefaultFont", FS(9)))
         self.txt_meas.pack(fill=tk.X, pady=(4, 0)); self.txt_meas.configure(state="disabled")
         row = ttk.Frame(box); row.pack(fill=tk.X, pady=(4, 0))
         ttk.Button(row, text="Убрать последнее", command=self.meas_undo).pack(side=tk.LEFT, expand=True, fill=tk.X)
@@ -753,7 +853,7 @@ class App(tk.Tk):
 
     def _label(self, x, y, txt, col, tag, anchor="center"):
         cv = self.canvas
-        t = cv.create_text(x, y, text=txt, fill=col, font=("TkDefaultFont", 9, "bold"), tags=tag, anchor=anchor)
+        t = cv.create_text(x, y, text=txt, fill=col, font=("TkDefaultFont", FS(9), "bold"), tags=tag, anchor=anchor)
         bb = cv.bbox(t)
         if bb:
             r = cv.create_rectangle(bb[0] - 3, bb[1] - 1, bb[2] + 3, bb[3] + 1, fill="#202020", outline="", tags=tag)
@@ -920,9 +1020,20 @@ class App(tk.Tk):
             cv.bind(b_, self._pan_start)
         for b_ in ("<B2-Motion>", "<B3-Motion>"):
             cv.bind(b_, self._pan_move)
+        if IS_MAC:                 # в macOS Ctrl+щелчок — это «правая кнопка»: Ctrl+перетаскивание двигает снимок
+            cv.bind("<Control-ButtonPress-1>", self._pan_start)
+            cv.bind("<Control-B1-Motion>", self._pan_move)
+            cv.bind("<Control-ButtonRelease-1>", lambda e: "break")
         cv.bind("<MouseWheel>", self._wheel)                       # Windows / macOS
         cv.bind("<Shift-MouseWheel>", lambda e: self._wheel(e, horizontal=True))
         cv.bind("<Control-MouseWheel>", lambda e: self._wheel(e, zoom=True))   # и щипок на тачпаде
+        if IS_MAC:                                                 # macOS: Cmd+колесо / Cmd+жест — масштаб
+            cv.bind("<Command-MouseWheel>", lambda e: self._wheel(e, zoom=True))
+            cv.bind("<Option-MouseWheel>", lambda e: self._wheel(e, zoom=True))
+        try:                                                       # Tk 9: жест двумя пальцами (вверх-вниз и вбок)
+            cv.bind("<TouchpadScroll>", self._touch_pan)
+        except tk.TclError:
+            pass
         cv.bind("<Button-4>", self._wheel); cv.bind("<Button-5>", self._wheel)  # Linux
         cv.bind("<Control-Button-4>", lambda e: self._wheel(e, zoom=True))
         cv.bind("<Control-Button-5>", lambda e: self._wheel(e, zoom=True))
@@ -931,12 +1042,27 @@ class App(tk.Tk):
         cv.bind("<Configure>", lambda e: self.redraw(keep_view=True))
         self.lbl_img = ttk.Label(t1, text="", style="Status.TLabel")
         self.lbl_img.pack(anchor="w", pady=(4, 0))
-        leg = ttk.Frame(t1); leg.pack(anchor="w", pady=(2, 2))
-        for i, (col, txt) in enumerate((("#00c800", "модифицированные (с номером)"), ("#2878ff", "контур агломератов"),
-                                        ("#ff8c00", "первичные частицы (круги)"),
-                                        ("#e600c8", "НФ — неправильной формы (масса включается в агломераты)"))):
-            tk.Label(leg, text="■", fg=col, font=("TkDefaultFont", 12)).grid(row=i // 2, column=2 * (i % 2), sticky="w")
-            ttk.Label(leg, text=txt + "      ").grid(row=i // 2, column=2 * (i % 2) + 1, sticky="w")
+        leg = ttk.Frame(t1); leg.pack(anchor="w", fill=tk.X, pady=(2, 2))
+        items = []
+        for col, txt in (("#00c800", "модифицированные (с номером)"), ("#2878ff", "контур агломератов"),
+                         ("#ff8c00", "первичные частицы (круги)"),
+                         ("#e600c8", "НФ — неправильной формы (масса включается в агломераты)")):
+            it = ttk.Frame(leg)
+            tk.Label(it, text="■", fg=col, font=("TkDefaultFont", FS(12))).pack(side=tk.LEFT)
+            ttk.Label(it, text=txt).pack(side=tk.LEFT, padx=(0, self.px(18)))
+            items.append(it)
+
+        def _flow(e=None):         # легенда переносится на новые строки, если окно узкое (экран ноутбука)
+            W = max(1, leg.winfo_width()); x = y = rh = 0
+            for it in items:
+                w_, h_ = it.winfo_reqwidth(), it.winfo_reqheight()
+                if x and x + w_ > W:
+                    x = 0; y += rh; rh = 0
+                it.place(x=x, y=y); x += w_; rh = max(rh, h_)
+            if leg.winfo_reqheight() != y + rh:
+                leg.configure(height=y + rh)
+        leg.bind("<Configure>", _flow)
+        _flow()
 
         # --- Сводка: заголовки в две строки, ширина колонок подстраивается под окно (без прокрутки вбок)
         t2 = ttk.Frame(nb); nb.add(t2, text="  Сводка  ")
@@ -987,7 +1113,7 @@ class App(tk.Tk):
         self.sum_cols = tuple(c[0] for c in cols); self.sum_heads = tuple(c[1] for c in cols)
         for l in self.sum_hdr_lbls:
             l.destroy()
-        self.sum_hdr_lbls = [tk.Label(self.sum_hdr, text=h, bg="#ece8f4", font=("TkDefaultFont", 9, "bold"), justify="center",
+        self.sum_hdr_lbls = [tk.Label(self.sum_hdr, text=h, bg="#ece8f4", font=("TkDefaultFont", FS(9), "bold"), justify="center",
                                       anchor="center", relief="flat", borderwidth=0) for h in self.sum_heads]
         self.tree.configure(columns=self.sum_cols)
         for c in self.sum_cols:
@@ -1000,7 +1126,7 @@ class App(tk.Tk):
         W = self.tree.winfo_width()
         if W < 50:
             return
-        f = tkfont.nametofont("TkDefaultFont"); fb = tkfont.Font(font=("TkDefaultFont", 9, "bold"))
+        f = tkfont.nametofont("TkDefaultFont"); fb = tkfont.Font(font=("TkDefaultFont", FS(9), "bold"))
         need = []
         for j, (c, h) in enumerate(zip(self.sum_cols, self.sum_heads)):
             w = max(fb.measure(line) for line in h.split("\n")) + self.px(10)
@@ -1067,7 +1193,7 @@ class App(tk.Tk):
         self.lbl_files.config(text="Выбрано файлов: {}{}".format(
             len(self.files), "   (без масштаба в метаданных: {})".format(nometa) if nometa else ""))
         self.log("Выбрано файлов: {}; без масштаба в метаданных: {}".format(len(self.files), nometa))
-        self.sec_edit.set_enabled(False); self.sec_par.expand()
+        self.sec_edit.set_enabled(True); self.sec_ml.set_enabled(True); self.sec_par.expand()
         self.current = None
         self.refresh_list()
         self.lst.selection_set(0); self.show(self.files[0])
@@ -1548,8 +1674,9 @@ class App(tk.Tk):
         w = cv.get_tk_widget(); w.pack(fill=tk.BOTH, expand=True)
         self._hover_setup(fig, cv)
         w.bind("<Button-3>", lambda e: self._chart_menu(fig, cv, base, e))
-        if sys.platform == "darwin":
+        if IS_MAC:                 # в macOS правая кнопка — Button-2, а также Ctrl+щелчок
             w.bind("<Button-2>", lambda e: self._chart_menu(fig, cv, base, e))
+            w.bind("<Control-Button-1>", lambda e: self._chart_menu(fig, cv, base, e))
 
     def _hover_setup(self, fig, cv):
         """Подсказка со значением столбца при наведении мыши (с задержкой ~0,3 с, чтобы не мельтешило)."""
@@ -1829,11 +1956,25 @@ class App(tk.Tk):
         if zoom:                       # Ctrl+колесо: вниз — увеличить, вверх — уменьшить
             self.set_zoom(1 / 1.15 if up else 1.15, at=(e.x, e.y))
             return "break"
-        steps = -1 if up else 1
-        if sys.platform == "darwin":
-            steps = -int(e.delta) or steps
-        (self.canvas.xview_scroll if horizontal else self.canvas.yview_scroll)(steps * 3, "units")
+        steps = self._wheel_steps(e, "_acc_img_x" if horizontal else "_acc_img_y", scale=3.0 if IS_MAC else 1.0)
+        if not steps:
+            return "break"
+        (self.canvas.xview_scroll if horizontal else self.canvas.yview_scroll)(steps, "units")
         self._schedule_render()
+        return "break"
+
+    def _touch_pan(self, e):
+        """Tk 9 (macOS): жест двумя пальцами на тачпаде двигает снимок в обе стороны."""
+        if self._img is None:
+            return "break"
+        d = getattr(e, "delta", 0) or 0
+        dx, dy = (d >> 16) & 0xFFFF, d & 0xFFFF
+        dx = dx - 0x10000 if dx >= 0x8000 else dx
+        dy = dy - 0x10000 if dy >= 0x8000 else dy
+        if dx or dy:
+            self.canvas.scan_mark(0, 0)
+            self.canvas.scan_dragto(int(dx), int(dy), gain=1)
+            self._schedule_render()
         return "break"
 
     def _pan_start(self, e):
@@ -2010,7 +2151,7 @@ class App(tk.Tk):
         for X in (X0, X1):
             cv.create_rectangle(X - h, Y - h, X + h, Y + h, outline="#ff2020", width=2, fill="", tags="bar")
         cv.create_text((X0 + X1) / 2, Y - self.px(14), text="{:.0f} пикс".format(abs(x1 - x0)), fill="#ff2020",
-                       font=("TkDefaultFont", 9, "bold"), tags="bar")
+                       font=("TkDefaultFont", FS(9), "bold"), tags="bar")
 
     def _bar_hit(self, e):
         """Что под курсором у красной линии: 'x0', 'x1', 'move' или None."""
@@ -2036,7 +2177,7 @@ class App(tk.Tk):
                  "add_contour": "Инструмент: добавить контур",
                  "del_poly": "Инструмент: удалить внутри ломаной", "del_spline": "Инструмент: удалить внутри сплайна",
                  "add_poly": "Инструмент: добавить ломаную", "add_spline": "Инструмент: добавить сплайн",
-                 "ml_c3": "Инструмент: круг по трём точкам края", "ml_doubt": "Инструмент: отметка «?» на круге",
+                 "add_c3": "Инструмент: круг по трём точкам края", "ml_doubt": "Инструмент: отметка «?» на круге",
                  "ml_region": "Инструмент: зона разметки (прямоугольник)"}
         self._poly_cancel(); self._c3_cancel()
         self.lbl_tool.config(text=names.get(self.v_tool.get(), ""))
@@ -2090,6 +2231,9 @@ class App(tk.Tk):
             self.v_contour.set(True); self.v_circles.set(True); self.redraw(keep_view=True)
         if tool.startswith("ml_"):
             self._ml_press(r, tool, x, y)
+            return
+        if tool == "add_c3":
+            self._c3_press(x, y)
             return
         if tool == "del_one":
             ops = self._ops()
@@ -2148,7 +2292,7 @@ class App(tk.Tk):
         (точки круга по трём точкам и отметки «?» часто ставятся быстро и рядом)."""
         if self._poly:
             self._poly_finish()
-        elif self.v_tool.get() in ("ml_c3", "ml_doubt"):
+        elif self.v_tool.get() in ("add_c3", "ml_doubt"):
             self.on_press(e)
 
     # ---------------------------------------------------------------- замкнутая ломаная / сплайн
@@ -2410,7 +2554,7 @@ class App(tk.Tk):
                     cx, cy = sh[1], sh[2]
                 else:
                     a = np.array(sh[1]); cx, cy = a[:, 0].mean(), a[:, 1].mean()
-                cv.create_text(*self._cv(cx, cy), text="удалить", fill=C_DEL, font=("TkDefaultFont", 9, "bold"), tags="edit")
+                cv.create_text(*self._cv(cx, cy), text="удалить", fill=C_DEL, font=("TkDefaultFont", FS(9), "bold"), tags="edit")
 
     def edit_undo(self):
         """Ctrl+Z: сначала снимаются неприменённые отметки, затем отменяются до 3 последних применённых
@@ -2496,7 +2640,7 @@ class App(tk.Tk):
     # ================================================================== разметка для обучения (ML)
     def _build_ml(self, box, wrap):
         isz = self.px(22)
-        self._ico_ml = {k: make_icon(k, isz) for k in ("c3", "doubt", "region")}
+        self._ico_ml = {k: make_icon(k, isz) for k in ("doubt", "region")}
         row = ttk.Frame(box); row.pack(fill=tk.X)
         ttk.Label(row, text="Разметчик:").pack(side=tk.LEFT)
         self.v_ml_annot = tk.StringVar(value=self.mlcfg.get("annotator", ""))
@@ -2512,11 +2656,9 @@ class App(tk.Tk):
         ttk.Button(row, text="Папка…", command=self._ml_choose_dir).pack(side=tk.RIGHT)
         row = ttk.Frame(box); row.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(row, text="Инструменты:").pack(side=tk.LEFT)
-        for k, val, tip in (("region", "ml_region", "Зона разметки: прямоугольник по диагонали"),
-                            ("doubt", "ml_doubt", "Отметка «?»: щелчок по кругу ставит или снимает"),
-                            ("c3", "ml_c3", "Круг по трём точкам края частицы")):
+        for k, val, tip in (("region", "ml_region", TIP_REGION), ("doubt", "ml_doubt", TIP_DOUBT)):
             rb = ttk.Radiobutton(row, image=self._ico_ml[k], style="Toolbutton", variable=self.v_tool, value=val)
-            rb.pack(side=tk.RIGHT, padx=1); Tip(rb, tip)
+            rb.pack(side=tk.RIGHT, padx=1); Tip(rb, tip, wrap=self.px(330))
         row = ttk.Frame(box); row.pack(fill=tk.X, pady=(4, 0))
         ttk.Button(row, text="Зона: весь кадр", command=self.ml_region_reset).pack(side=tk.LEFT, expand=True, fill=tk.X)
         b = ttk.Button(row, text="Начать с нуля", command=self.ml_scratch)
@@ -2578,20 +2720,22 @@ class App(tk.Tk):
                 ml["doubt"].add(k); msg = "Круг отмечен как сомнительный («?»)."
             self._ml_tick(); self._draw_ml(); self._ml_refresh(); self.status(msg)
             return
-        if tool == "ml_c3":
-            self._c3 = (self._c3 or []) + [(x, y)]
-            if len(self._c3) < 3:
-                self._draw_ml(); self.status("Точка {} из 3 на краю частицы (Esc — отмена).".format(len(self._c3)))
-                return
-            pts, self._c3 = self._c3, None
-            self._draw_ml()
-            cc = ml_annot.circumcircle(*pts)
-            if cc is None or cc[2] < 1.5:
-                self.status("Точки почти на одной прямой — поставьте их по краю частицы заново.")
-                return
-            self._ops().append(dict(op="add", cls="prim", shape=("circle", cc[0], cc[1], cc[2])))
-            self._after_op()
-            self.status("Круг по трём точкам добавлен (d = {}). Enter — применить.".format(self._fmt_len(2 * cc[2], self.current)))
+
+    def _c3_press(self, x, y):
+        """Круг по трём точкам края (раздел «Редактировать» → «Добавить элемент»); тип — первичная / модифицированная."""
+        self._c3 = (self._c3 or []) + [(x, y)]
+        if len(self._c3) < 3:
+            self._draw_ml(); self.status("Точка {} из 3 на краю частицы (Esc — отмена).".format(len(self._c3)))
+            return
+        pts, self._c3 = self._c3, None
+        self._draw_ml()
+        cc = ml_annot.circumcircle(*pts)
+        if cc is None or cc[2] < 1.5:
+            self.status("Точки почти на одной прямой — поставьте их по краю частицы заново.")
+            return
+        self._ops().append(dict(op="add", cls=self.v_addcls.get(), shape=("circle", cc[0], cc[1], cc[2])))
+        self._after_op()
+        self.status("Круг по трём точкам добавлен (d = {}). Enter — применить.".format(self._fmt_len(2 * cc[2], self.current)))
 
     def _c3_cancel(self):
         if self._c3:
@@ -2614,17 +2758,18 @@ class App(tk.Tk):
                     if ml_annot.key(c[0], c[1]) in ml["doubt"]:
                         X, Y = self._cv(c[1], c[0]); RR = c[2] / 2 / s * z
                         cv.create_oval(X - RR, Y - RR, X + RR, Y + RR, outline=C_ML, width=2, dash=(4, 3), tags="ml")
-                        cv.create_text(X, Y, text="?", fill=C_ML, font=("TkDefaultFont", max(8, min(16, int(RR))), "bold"),
+                        cv.create_text(X, Y, text="?", fill=C_ML, font=("TkDefaultFont", FS(max(8, min(16, int(RR)))), "bold"),
                                        tags="ml")
             if ml["region"]:
                 x0, y0, x1, y1 = ml["region"]
                 cv.create_rectangle(*self._cv(x0, y0), *self._cv(x1, y1), outline=C_ML, width=2, dash=(8, 4), tags="ml")
                 X, Y = self._cv(x0, y0)
                 cv.create_text(X + 4, Y + 4, text="зона разметки", fill=C_ML, anchor="nw",
-                               font=("TkDefaultFont", 9, "bold"), tags="ml")
+                               font=("TkDefaultFont", FS(9), "bold"), tags="ml")
+        col = C_MOD if self.v_addcls.get() == "mod" else C_PRIM
         for (px_, py_) in (self._c3 or []):
             X, Y = self._cv(px_, py_); h = self.px(4)
-            cv.create_oval(X - h, Y - h, X + h, Y + h, outline=C_ML, width=2, tags="mltmp")
+            cv.create_oval(X - h, Y - h, X + h, Y + h, outline=col, fill="white", width=2, tags="mltmp")
 
     def _ml_refresh(self):
         """Строки состояния блока ML (о наборе — только когда блок раскрыт)."""
@@ -2827,10 +2972,10 @@ class App(tk.Tk):
         win = tk.Toplevel(self); win.title("Памятка: разметка для обучения"); win.transient(self)
         win.geometry("{}x{}".format(self.px(640), self.px(600)))
         fr = ttk.Frame(win, padding=(12, 12, 12, 0)); fr.pack(fill=tk.BOTH, expand=True)
-        txt = tk.Text(fr, wrap="word", relief="flat", padx=8, pady=6, font=("TkDefaultFont", 10), spacing1=2)
+        txt = tk.Text(fr, wrap="word", relief="flat", padx=8, pady=6, font=("TkDefaultFont", FS(10)), spacing1=2)
         sb = ttk.Scrollbar(fr, orient=tk.VERTICAL, command=txt.yview); txt.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y); txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        txt.tag_configure("h", font=("TkDefaultFont", 11, "bold"), spacing1=8, foreground=ACCENT)
+        txt.tag_configure("h", font=("TkDefaultFont", FS(11), "bold"), spacing1=8, foreground=ACCENT)
         for i, line in enumerate(ml_annot.MEMO.strip().split("\n")):
             head = i == 0 or (line and not line.startswith(("•", " ")) and not line[:1].isdigit())
             txt.insert(tk.END, line + "\n", "h" if head else ())
@@ -3072,11 +3217,14 @@ class App(tk.Tk):
     # ------------------------------------------------------------------ о программе
     @staticmethod
     def about_text():
-        """Текст окна «О программе». При запуске из исходников — из файла !infoabout.txt рядом с app.py;
-        в собранной программе — только встроенный при сборке текст (модуль about_text), правка файла не действует."""
+        """Текст окна «О программе». При запуске из исходников — из файла resources/!infoabout.txt
+        (или !infoabout.txt рядом с app.py); в собранной программе — только встроенный при сборке текст
+        (модуль about_text), правка файла не действует."""
         if not getattr(sys, "frozen", False):
-            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "!infoabout.txt")
-            if os.path.exists(p):
+            here = os.path.dirname(os.path.abspath(__file__))
+            for p in (os.path.join(here, "resources", "!infoabout.txt"), os.path.join(here, "!infoabout.txt")):
+                if not os.path.exists(p):
+                    continue
                 try:
                     with open(p, encoding="utf-8-sig") as fh:
                         return fh.read()
@@ -3094,10 +3242,10 @@ class App(tk.Tk):
         top = ttk.Frame(win, padding=(12, 12, 12, 6)); top.pack(fill=tk.X)
         if getattr(self, "_icons", None):
             tk.Label(top, image=self._icons[1]).pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(top, text="NPA — NanoParticle Analyzer", font=("TkDefaultFont", 13, "bold")).pack(anchor="w")
+        ttk.Label(top, text="NPA — NanoParticle Analyzer", font=("TkDefaultFont", FS(13), "bold")).pack(anchor="w")
         ttk.Label(top, text="Анализ наночастиц на ПЭМ-снимках", style="Info.TLabel").pack(anchor="w")
         fr = ttk.Frame(win, padding=(12, 0, 12, 0)); fr.pack(fill=tk.BOTH, expand=True)
-        txt = tk.Text(fr, wrap="word", relief="flat", padx=8, pady=6, font=("TkDefaultFont", 10))
+        txt = tk.Text(fr, wrap="word", relief="flat", padx=8, pady=6, font=("TkDefaultFont", FS(10)))
         sb = ttk.Scrollbar(fr, orient=tk.VERTICAL, command=txt.yview); txt.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y); txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         txt.insert("1.0", self.about_text()); txt.configure(state="disabled")
@@ -3106,6 +3254,26 @@ class App(tk.Tk):
 
 
 # ---------------------------------------------------------------------- запуск
+def total_ram_gb():
+    """Объём оперативной памяти, ГБ (0 — если узнать не удалось)."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class MS(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            m = MS(); m.dwLength = ctypes.sizeof(MS)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+            return m.ullTotalPhys / 2 ** 30
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 2 ** 30
+    except Exception:
+        return 0.0
+
+
 def windows_setup():
     """Для Windows (до создания окна): учитывать масштаб экрана 125-200 % и показывать значок NPA на панели задач."""
     if sys.platform != "win32":
