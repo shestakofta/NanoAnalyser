@@ -49,6 +49,10 @@ jobs:
 
     env:
       TARGET: ${{ inputs.target }}
+      # Python везде пишет и читает текст в UTF-8: на машинах Windows вывод в журнал сборки
+      # иначе идёт в cp1252, и любой print с русскими буквами останавливает сборку
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
 
     steps:
       - name: Checkout source
@@ -110,7 +114,8 @@ jobs:
         run: |
           EXTRA=()
           [ -n "$ICON" ] && EXTRA+=(--icon "$ICON")
-          [ -d resources ] && EXTRA+=(--add-data "resources:resources")
+          SEP=":"; [ "$RUNNER_OS" = "Windows" ] && SEP=";"     # разделитель --add-data: в Windows «;»
+          [ -d resources ] && EXTRA+=(--add-data "resources${SEP}resources")
           [ "$RUNNER_OS" = "macOS" ] && EXTRA+=(--osx-bundle-identifier "ru.mipt.cifm.npa")
           python -m PyInstaller \
             --noconfirm \

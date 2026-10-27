@@ -8,6 +8,14 @@ make_about.py — встраивает текст окна «О программ
 Файл ищется в папке resources/ (структура для сборки через GitHub), затем рядом с этим скриптом.
 """
 import os
+import sys
+
+# Вывод в консоль — в UTF-8 при любой кодировке системы (в Windows вывод в файл или конвейер,
+# например в GitHub Actions, по умолчанию идёт в cp1252 и падает на русских буквах).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 here = os.path.dirname(os.path.abspath(__file__))
 for src in (os.path.join(here, "resources", "!infoabout.txt"), os.path.join(here, "!infoabout.txt")):
