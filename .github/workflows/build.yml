@@ -1,46 +1,28 @@
-name: Build NPA
-
-# Сборка программы NPA для ОДНОЙ выбранной платформы из одних и тех же исходников.
-# Запуск: вкладка Actions → Build NPA → Run workflow → выбрать платформу → Run workflow.
-# Результат — во вкладке запуска, раздел Artifacts (zip или tar.gz).
-#
-#   mac-arm64 — NPA ML.app для Mac на Apple Silicon (M1–M4, A18 Pro / MacBook Neo)
-#   mac-intel — NPA ML.app для Mac с процессором Intel
-#   windows   — папка NanoAnalyzer с NanoAnalyzer.exe (Windows 10/11, 64 бит)
-#   linux     — папка NanoAnalyzer с исполняемым файлом NanoAnalyzer (x86_64, glibc ≥ 2.35:
-#               Ubuntu 22.04+, Debian 12+, Astra/РЕД ОС с тем же поколением библиотек)
-#
-# Отличия платформ включаются в app.py сами при запуске; здесь различаются только
-# машина сборки, имя программы, значок и упаковка.
-# Значки и текст «О программе» ищутся в resources/, а если там нет — в корне репозитория,
-# поэтому сценарий работает и со структурой «для Windows» (всё в корне).
+name: Build and release NanoAnalyzer
 
 on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      target:
-        description: "Платформа"
-        type: choice
-        required: true
-        default: mac-arm64
-        options:
-          - mac-arm64
-          - mac-intel
-          - windows
-          - linux
-      smoke_test:
-        description: "Проверить собранную программу на тестовом снимке (+1–3 мин)"
-        type: boolean
-        default: true
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build ${{ inputs.target }}
-    # машина сборки для выбранной платформы
-    runs-on: ${{ fromJSON('{"mac-arm64":"macos-15","mac-intel":"macos-15-intel","windows":"windows-latest","linux":"ubuntu-22.04"}')[inputs.target] }}
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: windows, os: windows-latest, asset: NanoAnalyzer-Windows}
+          - {target: mac-arm64, os: macos-15, asset: NanoAnalyzer-macOS-arm64}
+          - {target: mac-intel, os: macos-15-intel, asset: NanoAnalyzer-macOS-Intel}
+          - {target: linux, os: ubuntu-22.04, asset: NanoAnalyzer-Linux}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
 
     defaults:
@@ -48,7 +30,7 @@ jobs:
         shell: bash           # одинаковые команды на всех системах (в Windows — Git Bash)
 
     env:
-      TARGET: ${{ inputs.target }}
+      TARGET: ${{ matrix.target }}
       # Python везде пишет и читает текст в UTF-8: на машинах Windows вывод в журнал сборки
       # иначе идёт в cp1252, и любой print с русскими буквами останавливает сборку
       PYTHONUTF8: "1"
@@ -84,7 +66,7 @@ jobs:
             echo "APP=$APP"
             echo "ICON=$ICON"
             echo "VERSION=$VERSION"
-            echo "PKG=NPA-v$VERSION-$TARGET"
+            echo "PKG=${{ matrix.asset }}"
           } >> "$GITHUB_ENV"
           echo "Платформа: $TARGET | программа: $APP | значок: ${ICON:-нет} | версия: $VERSION"
 
@@ -154,14 +136,13 @@ jobs:
         # Собранная программа в пакетном режиме (--batch) обрабатывает искусственный снимок:
         # проверяются все библиотеки внутри сборки, параллельная обработка и отчёты Excel.
         # Масштаб задаётся файлом nano_settings.json рядом с исполняемым файлом; после проверки он удаляется.
-        if: inputs.smoke_test
         timeout-minutes: 10
         run: |
           mkdir -p smoke_test
           python ci/make_test_image.py smoke_test
           SET="$(dirname "$BIN")/nano_settings.json"
           echo '{"nm_per_px": 0.5}' > "$SET"
-          "$BIN" --batch smoke_test/out smoke_test/smoke.png || true
+          "$BIN" --batch smoke_test/out smoke_test/smoke.png
           rm -f "$SET"
           cat smoke_test/out/batch_log.txt
           grep -q "done: 1 of 1" smoke_test/out/batch_log.txt
@@ -202,3 +183,39 @@ jobs:
           path: ${{ env.ARCHIVE }}
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: NanoAnalyzer-*
+          path: release
+          merge-multiple: true
+      - name: Check assets and generate checksums
+        working-directory: release
+        run: |
+          test -s NanoAnalyzer-Windows.zip
+          test -s NanoAnalyzer-macOS-arm64.zip
+          test -s NanoAnalyzer-macOS-Intel.zip
+          test -s NanoAnalyzer-Linux.tar.gz
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft --title "NanoAnalyzer $TAG" --generate-notes
+          fi
+          gh release upload "$TAG" release/* --clobber
+          gh release edit "$TAG" --draft=false
