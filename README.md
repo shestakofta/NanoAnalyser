@@ -1,13 +1,5 @@
 # NPA — NanoParticle Analyzer
 
-**Анализ наночастиц на снимках просвечивающей электронной микроскопии (ПЭМ)**
-
-[![Release](https://img.shields.io/github/v/release/shestakofta/NanoAnalyser_test?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest)
-![Python](https://img.shields.io/badge/Python-3.10%E2%80%933.12-3776AB?logo=python&logoColor=white)
-![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
-
-<<<<<<< HEAD
-NPA автоматически обрабатывает ПЭМ-снимки порошков и агломератов наночастиц металлов. Программа находит на снимке вещество, выделяет крупные (модифицированные) частицы и тела неправильной формы, размечает первичные частицы в агломератах кругами, определяет их размеры, рассчитывает массы и **долю массы модифицированных частиц** — по каждому снимку и по серии в целом.
 
 ## Скачать
 
@@ -20,12 +12,20 @@ NPA автоматически обрабатывает ПЭМ-снимки по
 
 Все версии и контрольные суммы (`SHA256SUMS.txt`) — на странице [Releases](https://github.com/shestakofta/NanoAnalyser_test/releases). Python устанавливать не нужно.
 
+**Анализ наночастиц на снимках просвечивающей электронной микроскопии (ПЭМ)**
+
+[![Release](https://img.shields.io/github/v/release/shestakofta/NanoAnalyser_test?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest)
+![Python](https://img.shields.io/badge/Python-3.10%E2%80%933.12-3776AB?logo=python&logoColor=white)
+![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+
+NPA автоматически обрабатывает ПЭМ-снимки порошков и агломератов наночастиц металлов. Программа находит на снимке вещество, выделяет крупные (модифицированные) частицы и тела неправильной формы, размечает первичные частицы в агломератах кругами, определяет их размеры, рассчитывает массы и **долю массы модифицированных частиц** — по каждому снимку и по серии в целом.
+
 ## Возможности
 
 - **Чтение снимков** TIFF (в том числе с масштабом из метаданных Olympus/SIS), JPEG, PNG, BMP. Масштаб — из метаданных, по масштабной линейке на снимке или вручную в нм/пиксель.
 - **Подготовка снимка:** вычитание неравномерного фона, удаление из контура тёмных участков подложки.
 - **Классификация крупных тел:** модифицированные частицы, скопления, тела неправильной формы (НФ), агломераты.
-- **Разметка первичных частиц кругами** в агломератах (метод v8).
+- **Разметка первичных частиц кругами** в агломератах.
 - **Расчёт масс:** плоская оценка и оценка с учётом частиц, скрытых в глубине агломерата (только для справки).
 - **Статистика распределений по размерам:** среднее, медиана и мода диаметров; графики с сохранением в PNG, JPEG, PDF, SVG и CSV.
 - **Отчёты Microsoft Excel:** краткий («Итог» и «Сводка») и полный (все частицы каждого снимка и параметры обработки).
@@ -38,16 +38,11 @@ NPA автоматически обрабатывает ПЭМ-снимки по
 
 | Класс | Что это | Как считается масса |
 |---|---|---|
-| Модифицированные частицы | крупные (больше отсечки, по умолчанию 25 нм) плотные округлые частицы | сплошной эллипсоид ближайшей формы |
+| Модифицированные частицы | крупные (больше отсечки, устанавливаемой пользователем) плотные округлые частицы | сплошной эллипсоид ближайшей формы |
 | Агломераты | рыхлые цепочки мелких первичных частиц, размеченных кругами | сумма шаров видимых частиц; дополнительно — оценка с учётом глубины |
-| НФ | плотные тела неправильной формы | эллипсоид × 0,74 (плотная упаковка шаров), прибавляется к агломератам |
+| НФ | плотные тела неправильной формы | эллипсоид из плотно упакованных шаров, прибавляется к агломератам |
 
 **Доля модифицированной массы** = масса модифицированных / (модифицированные + агломераты). Плотность материала можно сменить после обработки — массы пересчитываются сразу.
-=======
-| Windows | macOS Silicon | macOS Intel | Linux |
-|:---:|:---:|:---:|:---:|
-| [![Windows](https://img.shields.io/badge/Download-Windows-0078D4?logo=windows&logoColor=white)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-Windows.zip) | [![macOS Silicon](https://img.shields.io/badge/Download-macOS-000000?logo=apple&logoColor=white)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-macOS-arm64.zip) | [![macOS Intel](https://img.shields.io/badge/Download-macOS-000000?logo=apple&logoColor=white)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-macOS-Intel.zip) | [![Linux](https://img.shields.io/badge/Download-Linux-FCC624?logo=linux&logoColor=black)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-Linux.tar.gz) |
->>>>>>> 18a0a1791de48c856bb9c721bd19696dbbb97010
 
 ## Запуск
 
@@ -95,6 +90,12 @@ NanoAnalyzer.exe --batch ПАПКА_РЕЗУЛЬТАТОВ снимок1.tif с�
 - Разметка первичных частиц кругами (метод v8) и классификация крупных тел — собственные методы, подобранные по ручной разметке снимков.
 
 > Результаты автоматической обработки носят оценочный характер и должны проверяться пользователем.
+
+## Сборка и выпуск версий
+
+Сборка идёт в GitHub Actions (сценарий [.github/workflows/build.yml](.github/workflows/build.yml), PyInstaller, режим onedir).
+
+- **Локально на Windows:** `build_exe.bat` — создаёт окружение, встраивает текст «О программе» из `resources/!infoabout.txt` и собирает папку `dist\NanoAnalyzer`.
 
 ## Разработчики
 
