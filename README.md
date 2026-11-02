@@ -5,9 +5,7 @@
 
 | Windows | macOS | Linux |
 |:---:|:---:|:---:|
-| [![Windows](https://img.shields.io/badge/Download-Windows-0078D4?logo=windows&logoColor=white)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-Windows.zip) | [![macOS](https://img.shields.io/badge/Download-macOS-000000?logo=apple&logoColor=white)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-macOS-arm64.zip) | [![Linux](https://img.shields.io/badge/Download-Linux-FCC624?logo=linux&logoColor=black)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-Linux.tar.gz) |
-
-macOS Intel: [Скачать](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-macOS-Intel.zip)
+| [![Windows](https://img.shields.io/badge/Download-Windows-0078D4?logo=windows&logoColor=white)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-Windows.zip) | [![macOS Silicon](https://img.shields.io/badge/Download-macOS-000000?logo=apple&logoColor=white)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-macOS-arm64.zip) | | [![macOS Intel](https://img.shields.io/badge/Download-macOS-000000?logo=apple&logoColor=white)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-macOS-Intel.zip) | [![Linux](https://img.shields.io/badge/Download-Linux-FCC624?logo=linux&logoColor=black)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-Linux.tar.gz) |
 
 ## Запуск
 
