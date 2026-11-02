@@ -103,12 +103,116 @@ def metadata_scale(path):
     return s
 
 
+def _box_grow(gray, box, max_px):
+    """
+    Дорисовывает к прямоугольнику бокса линейки то, что ещё относится к его оформлению: размытые или
+    сглаженные края рамки, светлую окантовку, белое поле. Каждая сторона сдвигается наружу, пока соседняя
+    строка (столбец) в основном заметно отличается от фона снимка рядом с боксом, но не больше чем на
+    max_px пикселей — частицы, касающиеся рамки, так не «съедаются».
+    """
+    H, W = gray.shape
+    y0, y1, x0, x1 = box
+    ref = gray[max(0, y0 - 40):max(0, y0 - 8), x0:x1]                     # фон над боксом
+    if ref.size < 200:
+        ref = gray[max(0, y0 - 40):y1, max(0, x0 - 40):max(0, x0 - 8)]    # или слева от него
+    if ref.size < 200:
+        return box
+    med = float(np.median(ref))
+    thr = max(12.0, 4.0 * 1.4826 * float(np.median(np.abs(ref - med))))
+
+    def odd(line):
+        return line.size > 0 and np.mean(np.abs(line.astype(np.float32) - med) > thr) > 0.5
+
+    for _ in range(max_px):                                               # вверх
+        if y0 <= 0 or not odd(gray[y0 - 1, x0:x1]):
+            break
+        y0 -= 1
+    for _ in range(max_px):                                               # влево
+        if x0 <= 0 or not odd(gray[y0:y1, x0 - 1]):
+            break
+        x0 -= 1
+    for _ in range(max_px):                                               # вниз
+        if y1 >= H or not odd(gray[y1, x0:x1]):
+            break
+        y1 += 1
+    for _ in range(max_px):                                               # вправо
+        if x1 >= W or not odd(gray[y0:y1, x1]):
+            break
+        x1 += 1
+    return y0, y1, x0, x1
+
+
+def _box_finish(gray, box):
+    """Окончательный прямоугольник исключения: оформление бокса + 2 пикс запаса; узкая полоска
+    (до 6 пикс) между боксом и краем кадра тоже исключается — это такой же край."""
+    H, W = gray.shape
+    y0, y1, x0, x1 = _box_grow(gray, box, max(8, int(round(0.008 * max(H, W)))))
+    y0, x0 = max(0, y0 - 2), max(0, x0 - 2)
+    y1, x1 = min(H, y1 + 2), min(W, x1 + 2)
+    if H - y1 <= 6:
+        y1 = H
+    if W - x1 <= 6:
+        x1 = W
+    return int(y0), int(y1), int(x0), int(x1)
+
+
+def _scalebar_by_fill(gray):
+    """
+    Запасной поиск бокса, когда рамка не чёрная (серая, сглаженная при уменьшении снимка, пересохранение):
+    в правой нижней части кадра ищется белое поле бокса (≥ 240) с длинной тёмной полосой линейки внутри.
+    """
+    H, W = gray.shape
+    ys = max(0, H - max(90, int(0.1 * H))); xs = int(W * 0.45)
+    sub = gray[ys:, xs:]
+    lab, n = ndi.label(sub >= 240)
+    if n == 0:
+        return None
+    best = None
+    for i, sl in enumerate(ndi.find_objects(lab), 1):
+        h, w = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
+        if w < 0.08 * W or h < 6:
+            continue
+        if best is None or w * h > best[1]:
+            best = (sl, w * h)
+    if best is None:
+        return None
+    sl = best[0]
+    by0, by1, bx0, bx1 = sl[0].start + ys, sl[0].stop + ys, sl[1].start + xs, sl[1].stop + xs
+    inner = gray[by0:by1, bx0:bx1]
+    level = 0.5 * (255.0 + float(np.median(gray[max(0, by0 - 40):max(0, by0 - 8), bx0:bx1])
+                                 if by0 > 40 else 128.0))
+    dark = inner < min(level, 160.0)
+    wd = dark.shape[1]
+    groups = []                     # отрезки почти одинаковых концов (±2 пикс) в разных строках — края полосы линейки
+    for r in range(dark.shape[0]):
+        d = np.diff(np.r_[0, dark[r].astype(np.int8), 0])
+        for a, b in zip(np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]):
+            if b - a <= 0.3 * wd:
+                continue
+            for gr in groups:
+                if abs(gr["a"] - a) <= 2 and abs(gr["b"] - b) <= 2:
+                    gr["rows"].append(r); gr["len"].append(b - a)
+                    break
+            else:
+                groups.append(dict(a=int(a), b=int(b), rows=[r], len=[b - a]))
+    cand = [gr for gr in groups if len(gr["rows"]) >= 2]
+    if not cand:
+        return None
+    gr = max(cand, key=lambda t: np.median(t["len"]))
+    a = gr["a"]; b = a + int(round(float(np.median(gr["len"])))); rows = gr["rows"]
+    box = _box_finish(gray, (by0, by1, bx0, bx1))
+    return dict(length_px=int(b - a), y=float(by0 + np.median(rows)), x0=float(a + bx0), x1=float(b + bx0), box=box)
+
+
 def find_scalebar(gray):
     """
     Ищет масштабную линейку (бокс Olympus/SIS в правом нижнем углу): в нижней полосе снимка находит
     тёмные горизонтальные отрезки; самый длинный — рамка бокса, а линейка — самый длинный отрезок
     внутри рамки, встречающийся хотя бы в двух строках. Возвращает
     {length_px, y, x0, x1, box=(y0, y1, x0, x1)} или None.
+    box — прямоугольник, исключаемый из анализа: бокс целиком вместе с размытыми краями рамки
+    (_box_grow), без широкой «мёртвой зоны» вокруг. Если чёрной рамки нет (серая, сглаженная),
+    бокс ищется по белому полю (_scalebar_by_fill).
     """
     H, W = gray.shape
     y0 = max(0, H - max(60, int(0.06 * H))); x0 = int(W * 0.45)
@@ -121,7 +225,7 @@ def find_scalebar(gray):
             if b - a > 0.05 * W:
                 runs.setdefault((int(a), int(b)), []).append(r)
     if not runs:
-        return None
+        return _scalebar_by_fill(gray)
     fa, fb = max(runs, key=lambda k: k[1] - k[0])                 # рамка бокса
     inner = [(k, rows) for k, rows in runs.items() if len(rows) >= 2 and k[0] > fa + 1 and k[1] < fb - 1]
     if inner:
@@ -133,13 +237,8 @@ def find_scalebar(gray):
     # рамка бокса: строки с отрезками почти той же длины, что и самый длинный (верхняя и нижняя стороны)
     fr = sorted(r for k, rr in runs.items() if abs(k[0] - fa) <= 3 and abs(k[1] - fb) <= 3 for r in rr)
     top = y0 + (fr[0] if fr else min(rows))
-    bot = y0 + fr[-1] if fr and fr[-1] - fr[0] > 8 else H - 1
-    if H - 1 - bot <= 6:
-        bot = H - 1
-    xr = fb + x0 + 2
-    if W - xr <= 6:                       # узкая полоска между рамкой и краем кадра — тоже край
-        xr = W
-    box = (max(0, top - 2), min(H, bot + 3), max(0, fa + x0 - 2), min(W, xr))
+    bot = y0 + fr[-1] + 1 if fr and fr[-1] - fr[0] > 8 else H
+    box = _box_finish(gray, (top, bot, fa + x0, fb + x0 + 1))
     return dict(length_px=int(b - a), y=float(y), x0=float(a + x0), x1=float(b + x0), box=box)
 
 
@@ -250,6 +349,22 @@ def film_mask(D, M, s, valid, se_nm=15.0, k_th=4.0, k_d=0.6, amin_nm2=2000.0):
     return ndi.binary_dilation(F, iterations=max(1, int(round(1.5 / s)))) & M
 
 
+def _fill_invalid(gray, valid):
+    """
+    Копия снимка, в которой исключённая область (бокс линейки) залита уровнем фона вокруг неё.
+    Иначе сглаживание размазывает чёрную рамку, линейку и надписи бокса на соседние пиксели снимка:
+    вдоль рамки появляется ложный контур, а в нём — попытки искать частицы. Чем сильнее
+    шумоподавление и крупнее пиксель, тем шире эта полоса.
+    """
+    if valid.all():
+        return gray
+    ring = ndi.binary_dilation(~valid, iterations=25) & valid
+    vals = gray[ring] if ring.sum() >= 50 else gray[valid]
+    out = np.array(gray, dtype=float, copy=True)
+    out[~valid] = float(np.median(vals)) if vals.size else float(np.median(gray))
+    return out
+
+
 def segment(gray, s, params, valid):
     """
     Находит всё вещество на снимке.
@@ -257,6 +372,7 @@ def segment(gray, s, params, valid):
     одиночной первичной частицы), m0 (грубая маска).
     """
     k = params["denoise"]
+    gray = _fill_invalid(gray, valid)                                  # бокс линейки не размазывается на снимок
     g = ndi.gaussian_filter(gray, k * max(0.8, 1.2 * s) / s)          # сглаживание шума
     bg = background(g, valid)
     r = (g - bg)[valid]
@@ -271,7 +387,7 @@ def segment(gray, s, params, valid):
     e0 = ndi.distance_transform_edt(m0) * s
     thin = skeletonize(m0) & (e0 > 2) & (e0 < 5)                      # оси тонких одиночных цепочек
     lvl1 = np.median(D[thin]) if thin.sum() > 50 else (np.median(D[m0]) if m0.any() else 1.0)
-    m = (D > params["contrast"] * lvl1) & ndi.binary_dilation(m0, iterations=2)
+    m = (D > params["contrast"] * lvl1) & ndi.binary_dilation(m0, iterations=2) & valid
     m = morphology.remove_small_holes(m, int((2 / s) ** 2))
     m = morphology.remove_small_objects(m, max(3, int(10 / s ** 2)))
     lab = measure.label(m); keep = np.unique(lab[m0 & m]); m = np.isin(lab, keep[keep > 0])
