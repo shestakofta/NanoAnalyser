@@ -1,5 +1,11 @@
 # NPA — NanoParticle Analyzer
 
+**Анализ наночастиц на снимках просвечивающей электронной микроскопии (ПЭМ)**
+
+[![Release](https://img.shields.io/github/v/release/shestakofta/NanoAnalyser_test?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest)
+![Python](https://img.shields.io/badge/Python-3.10%E2%80%933.12-3776AB?logo=python&logoColor=white)
+![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+
 
 ## Скачать
 
@@ -12,11 +18,6 @@
 
 Все версии и контрольные суммы (`SHA256SUMS.txt`) — на странице [Releases](https://github.com/shestakofta/NanoAnalyser_test/releases). Python устанавливать не нужно.
 
-**Анализ наночастиц на снимках просвечивающей электронной микроскопии (ПЭМ)**
-
-[![Release](https://img.shields.io/github/v/release/shestakofta/NanoAnalyser_test?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest)
-![Python](https://img.shields.io/badge/Python-3.10%E2%80%933.12-3776AB?logo=python&logoColor=white)
-![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
 NPA автоматически обрабатывает ПЭМ-снимки порошков и агломератов наночастиц металлов. Программа находит на снимке вещество, выделяет крупные (модифицированные) частицы и тела неправильной формы, размечает первичные частицы в агломератах кругами, определяет их размеры, рассчитывает массы и **долю массы модифицированных частиц** — по каждому снимку и по серии в целом.
 
