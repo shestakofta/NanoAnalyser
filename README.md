@@ -6,6 +6,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%E2%80%933.12-3776AB?logo=python&logoColor=white)
 ![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
+<<<<<<< HEAD
 NPA автоматически обрабатывает ПЭМ-снимки порошков и агломератов наночастиц металлов. Программа находит на снимке вещество, выделяет крупные (модифицированные) частицы и тела неправильной формы, размечает первичные частицы в агломератах кругами, определяет их размеры, рассчитывает массы и **долю массы модифицированных частиц** — по каждому снимку и по серии в целом.
 
 ## Скачать
@@ -42,6 +43,11 @@ NPA автоматически обрабатывает ПЭМ-снимки по
 | НФ | плотные тела неправильной формы | эллипсоид × 0,74 (плотная упаковка шаров), прибавляется к агломератам |
 
 **Доля модифицированной массы** = масса модифицированных / (модифицированные + агломераты). Плотность материала можно сменить после обработки — массы пересчитываются сразу.
+=======
+| Windows | macOS Silicon | macOS Intel | Linux |
+|:---:|:---:|:---:|:---:|
+| [![Windows](https://img.shields.io/badge/Download-Windows-0078D4?logo=windows&logoColor=white)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-Windows.zip) | [![macOS Silicon](https://img.shields.io/badge/Download-macOS-000000?logo=apple&logoColor=white)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-macOS-arm64.zip) | [![macOS Intel](https://img.shields.io/badge/Download-macOS-000000?logo=apple&logoColor=white)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-macOS-Intel.zip) | [![Linux](https://img.shields.io/badge/Download-Linux-FCC624?logo=linux&logoColor=black)](https://github.com/shestakofta/NanoAnalyser_test/releases/latest/download/NanoAnalyzer-Linux.tar.gz) |
+>>>>>>> 18a0a1791de48c856bb9c721bd19696dbbb97010
 
 ## Запуск
 
