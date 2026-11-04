@@ -63,6 +63,8 @@ DEFAULTS = dict(
     nf_packing=0.74,     # доля заполнения НФ шарами (плотная упаковка шаров одного размера)
     bar_px=None,         # длина линейки в пикселях, заданная вручную (красная линия на снимке)
     edge=0.25,           # край крупной частицы: 25 % от (максимум - подложка); подобрано на модельных сферах
+    extend=1.0,          # 1 — крупные частицы забирают узкие полоски вещества вдоль своего края, если форма от этого
+                         # не портится (extend_objects): бледный край крупной частицы — часть частицы, а не агломерат
     halo_nm=3.0,         # полоса размытия вокруг модифицированной частицы, не считается агломератом
     film=1.0,            # 1 — убирать из контура тёмные участки подложки (ступенька толщины плёнки), 0 — нет
     k_hyst_lo=2.2,       # пороги поиска вещества относительно шума фона
@@ -317,14 +319,15 @@ def background(g, valid, S_px=70, f=4, k=4.0, iters=4):
     return out
 
 
-def film_mask(D, M, s, valid, se_nm=15.0, k_th=4.0, k_d=0.6, amin_nm2=2000.0):
+def film_mask(D, M, s, valid, se_nm=15.0, k_th=4.0, k_d=0.6, amin_nm2=2000.0, wmin_nm=10.0):
     """
     Тёмные участки подложки внутри контура (ступенька толщины плёнки, край сетки): фон сглаживается
     плавно и такую ступеньку не повторяет, поэтому более тёмная часть плёнки попадает в контур.
     Признаки (проверено на 43 снимках Al с ручной разметкой и 84 снимках W):
       рельеф масштаба частицы слабый — морфологический top-hat затемнения (диск se_nm) < k_th шумов;
       затемнение ниже k_d от медианного затемнения частиц этого снимка;
-      связный участок площадью не меньше amin_nm2.
+      связный участок площадью не меньше amin_nm2 и шириной не меньше 2·wmin_nm (узкая бледная полоса —
+      это край крупной частицы, а не ступенька плёнки).
     """
     Ds = ndi.gaussian_filter(D, 1.0 / s)
     bgp = Ds[~ndi.binary_dilation(M, iterations=5) & valid]
@@ -345,8 +348,84 @@ def film_mask(D, M, s, valid, se_nm=15.0, k_th=4.0, k_d=0.6, amin_nm2=2000.0):
     if lab.max() == 0:
         return np.zeros_like(M)
     area = np.bincount(lab.ravel()); keep = area * s * s >= amin_nm2; keep[0] = False
+    # ступенька плёнки — широкий участок; узкая бледная полоса (край крупной частицы) — не плёнка
+    Fc = ndi.binary_fill_holes(ndi.binary_closing(lab > 0, structure=morphology.disk(max(1, int(round(3 / s))))))
+    edt = ndi.distance_transform_edt(Fc) * s                      # ширина — без мелких дыр от шума
+    thick = np.zeros(lab.max() + 1, bool)
+    if lab.max():
+        thick[1:] = ndi.maximum(edt, lab, index=np.arange(1, lab.max() + 1)) >= wmin_nm
+    keep &= thick
     F = keep[lab]
     return ndi.binary_dilation(F, iterations=max(1, int(round(1.5 / s)))) & M
+
+
+def extend_objects(res, D32, max_nm=15.0, tol=0.01, h_noise=4.0):
+    """
+    Вещество вдоль края крупной частицы (модифицированной или НФ), не вошедшее в неё: край частицы
+    проводится на 25 % её затемнения над окружением (refine), и бледный край крупной частицы
+    (убывающая толщина шара, оболочка) остаётся снаружи полоской. Такая полоска — часть частицы,
+    а прилипшие к частице мелкие частицы — нет. Различаются они так:
+      - затемнение края частицы от неё наружу только убывает, а у прилипшей частицы есть своя вершина
+        затемнения за «долиной» (проверка — морфологическая реконструкция от места касания: вершина
+        выше достижимого от касания уровня больше чем на h_noise шумов подложки — кусок не берётся);
+      - полоска вдоль края не портит выпуклость частицы (solidity падает не больше чем на tol).
+    Каждой частице предлагаются соседние куски вещества не дальше max_nm (ближайшие к ней, а не к другой).
+    """
+    s = res["s"]; om = res["objmap"]; H, W = om.shape
+    objs = [o for o in res["objects"] if o["cls"] in ("mod", "irr")]
+    if not objs:
+        return
+    left = res["m_all"] & (om == 0) & res["valid"]
+    if not left.any():
+        return
+    dist = ndi.distance_transform_edt(om == 0) * s
+    lab = segmentation.watershed(dist, om, mask=(om > 0) | (left & (dist <= max_nm)))
+    pad = int(max_nm / s) + 3
+    Dsf = ndi.gaussian_filter(D32.astype(np.float32), max(0.7, 0.4 / s))
+    h = h_noise * bg_stats(D32, res["m_all"], res["valid"], s)[1]
+
+    def solidity(m):
+        p = measure.regionprops(m.astype(np.uint8))
+        return p[0].solidity if p else 0.0
+    for o in objs:
+        ys, xs = np.nonzero(lab == o["id"])
+        if ys.size == 0:
+            continue
+        a, b = max(0, ys.min() - pad), min(H, ys.max() + pad + 1)
+        c, d = max(0, xs.min() - pad), min(W, xs.max() + pad + 1)
+        core = om[a:b, c:d] == o["id"]
+        cand = (lab[a:b, c:d] == o["id"]) & ~core & (om[a:b, c:d] == 0)
+        if not cand.any():
+            continue
+        pl, n = ndi.label(cand)
+        sizes = np.bincount(pl.ravel())
+        cur = core.copy(); sc = solidity(cur); changed = False
+        Dc = Dsf[a:b, c:d]; lo = float(Dc.min()) - 1.0
+        ring = ndi.binary_dilation(core, iterations=1) & ~core
+        for k in np.argsort(-sizes[1:]) + 1:
+            piece = pl == k
+            contact = piece & ring
+            if not contact.any():
+                continue
+            # своя вершина затемнения за «долиной» — это прилипшая частица, а не край
+            marker = np.where(contact, Dc, lo); maskr = np.where(piece, Dc, lo)
+            rec = morphology.reconstruction(np.minimum(marker, maskr), maskr, method="dilation")
+            if (Dc - rec)[piece].max() > h:
+                continue
+            trial = cur | piece
+            st = solidity(trial)
+            if st >= sc - tol:
+                cur, sc, changed = trial, max(sc, st) if st > sc else sc, True
+        if not changed:
+            continue
+        full = np.zeros((H, W), bool); full[a:b, c:d] = cur
+        f = particle_features(D32, full, s, res["lvl1"])
+        f["cut"] = bool(full[:2].any() or full[-2:].any() or full[:, :2].any() or full[:, -2:].any() or
+                        (ndi.binary_dilation(full, iterations=2) & ~res["valid"]).any())
+        yy, xx = np.nonzero(full)
+        f["pix"] = (yy.astype(np.int32), xx.astype(np.int32))
+        o.update(f)
+        om[full & (om == 0)] = o["id"]
 
 
 def _fill_invalid(gray, valid):
@@ -365,7 +444,7 @@ def _fill_invalid(gray, valid):
     return out
 
 
-def segment(gray, s, params, valid):
+def segment(gray, s, params, valid, info=None):
     """
     Находит всё вещество на снимке.
     Возвращает: m_all (контур по полувысоте), D (затемнение = фон - яркость), lvl1 (контраст
@@ -385,9 +464,32 @@ def segment(gray, s, params, valid):
     # затемнение для контуров (сглаживание помягче)
     D = bg - ndi.gaussian_filter(gray, k * max(0.5 / s, 1.0))
     e0 = ndi.distance_transform_edt(m0) * s
-    thin = skeletonize(m0) & (e0 > 2) & (e0 < 5)                      # оси тонких одиночных цепочек
+    sk = skeletonize(m0)
+    thin = sk & (e0 > 2) & (e0 < 5)                                   # оси тонких одиночных цепочек
     lvl1 = np.median(D[thin]) if thin.sum() > 50 else (np.median(D[m0]) if m0.any() else 1.0)
-    m = (D > params["contrast"] * lvl1) & ndi.binary_dilation(m0, iterations=2) & valid
+    if info is not None:
+        info["thin_frac"] = float(thin.sum()) / max(int(sk.sum()), 1)
+    # Контур — единое правило для тонких цепочек и крупных частиц. Пиксель — вещество, если его затемнение
+    # выше доли contrast (по умолчанию половины):
+    #   а) от затемнения одиночной первичной частицы lvl1 (прежнее правило, подобрано по ручной разметке) ИЛИ
+    #   б) от местного перепада «подложка — вещество»: наибольшего затемнения в окрестности 3 нм,
+    #      если этот кусок вещества связан с найденным по (а).
+    # (б) нужно крупным частицам: их край бледнее середины (убывающая толщина, оболочка), а середина
+    # бывает темнее lvl1 из-за дифракционного контраста — по одному (а) край уходил внутрь. Для тонких
+    # цепочек (б) почти совпадает с (а): местный перепад цепочки и есть lvl1.
+    c = params["contrast"]
+    Ds = ndi.gaussian_filter(D.astype(np.float32), max(0.7, 0.4 / s))
+    bg0, bgn = bg_stats(D, ndi.binary_fill_holes(m0), valid, s)
+    rl = max(2, int(round(3.0 / s)))
+    L = ndi.grey_dilation(np.where(m0, Ds, bg0), footprint=morphology.disk(rl))
+    mg = (D > c * lvl1) & ndi.binary_dilation(m0, iterations=2) & valid
+    # местный перепад учитывается, только если он заметно больше шума подложки (8 шумов): пятна шума
+    # и неровности подложки дают 3–5 шумов, настоящее вещество — от 10
+    ml = (Ds > bg0 + c * (L - bg0)) & (L - bg0 >= 8.0 * bgn) & ndi.binary_dilation(m0, iterations=rl + 2) & valid
+    # (б) только продолжает вещество, найденное по (а): отдельные бледные пятна (шум, загрязнения)
+    # по одному местному перепаду в контур не попадают
+    lab_, _ = ndi.label(mg | ml)
+    keep_ = np.unique(lab_[mg]); m = np.isin(lab_, keep_[keep_ > 0])
     m = morphology.remove_small_holes(m, int((2 / s) ** 2))
     m = morphology.remove_small_objects(m, max(3, int(10 / s ** 2)))
     lab = measure.label(m); keep = np.unique(lab[m0 & m]); m = np.isin(lab, keep[keep > 0])
@@ -444,6 +546,15 @@ def find_candidates(D, m_all, valid, s, lvl1, params):
     mk = np.zeros((H, W), np.int32)
     for i, q in enumerate(keep, 1): mk[q] = i
     return segmentation.watershed(-edm, mk, mask=part)
+
+
+def bg_stats(D, matter, valid, s):
+    """Уровень и шум затемнения подложки (слегка сглаженного) вдали от вещества."""
+    Ds = ndi.gaussian_filter(D.astype(np.float32), max(0.7, 0.4 / s))
+    far = ~ndi.binary_dilation(matter, iterations=max(3, int(round(5 / s)))) & valid
+    v = Ds[far] if far.sum() >= 500 else Ds[valid]
+    bg0 = float(np.median(v))
+    return bg0, 1.4826 * float(np.median(np.abs(v - bg0))) + 1e-3
 
 
 def refine(D, R0, others, valid, s, edge):
@@ -555,7 +666,8 @@ def analyze_image(path, params, progress=None):
     s, s_src = get_scale(gray, s_file, P)
     valid = valid_area(gray)
     step("контур вещества")
-    m_all, D, lvl1, m0 = segment(gray, s, P, valid)
+    info = {}
+    m_all, D, lvl1, m0 = segment(gray, s, P, valid, info)
     step("крупные частицы")
     if P.get("mode") == "no_mod":
         ws = np.zeros(m_all.shape, np.int32)          # модифицированные не ищем
@@ -563,7 +675,8 @@ def analyze_image(path, params, progress=None):
         ws = find_candidates(D, m_all, valid, s, lvl1, P)
     res = dict(path=path, name=os.path.basename(path), s=s, s_src=s_src, shape=gray.shape,
                lvl1=lvl1, m_all=m_all, valid=valid, objects=[], objmap=np.zeros(ws.shape, np.int32), params=P,
-               D=D.astype(np.float16))                # затемнение — для пересчёта кругов после правок
+               D=D.astype(np.float16),                # затемнение — для пересчёта кругов после правок
+               thin_frac=info.get("thin_frac", 0.0))  # доля тонких цепочек среди осевых линий вещества (для справки)
     D32 = res["D"].astype(np.float32)
     ids = [int(i) for i in np.unique(ws) if i > 0]
     allsel = ws > 0
@@ -576,6 +689,8 @@ def analyze_image(path, params, progress=None):
         if m.sum() * s * s < np.pi * (P["d_cut"] / 2) ** 2:
             continue
         add_body_parts(res, m, D32, from_circle=False)
+    if P.get("extend", 1.0):
+        extend_objects(res, D32)
     step("агломераты и первичные частицы")
     update_agglomerates(res)
     res["t_proc"] = time.time() - t0
